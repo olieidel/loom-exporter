@@ -21,6 +21,8 @@
    [nil "--cookie COOKIE" "Raw Loom browser Cookie header"]
    [nil "--cookie-file FILE" "Raw Cookie header or Netscape cookies.txt file"]
    [nil "--ffmpeg-bin BIN" "ffmpeg executable" :default "ffmpeg"]
+   [nil "--jobs N" "Parallel export jobs" :default 1 :parse-fn parse-long]
+   [nil "--no-progress" "Disable terminal progress bars"]
    [nil "--video-password PASSWORD" "Password for protected Loom videos"]
    [nil "--skip-video" "Write metadata only; do not download video files"]
    [nil "--force" "Redownload even when a video file exists"]
@@ -104,9 +106,7 @@
         (let [selected (mapv #(nth videos %) (sort selected-indices))]
           (if (empty? selected)
             (println "No videos selected.")
-            (if (tui/confirm? (count selected) (:out options))
-              (print-result (core/export-selected! options selected))
-              (println "Cancelled."))))
+            (print-result (core/export-selected! options selected))))
         (println "Cancelled.")))))
 
 (defn- fail! [message data]

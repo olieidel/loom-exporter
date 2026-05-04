@@ -318,10 +318,50 @@
               out (io/output-stream path)]
     (io/copy in out)))
 
+(defn- progress! [opts video data]
+  (when-let [f (:progress-fn opts)]
+    (f (or (:id video) (:url video))
+       (merge {:title (:title video)}
+              data))))
+
+(defn- parse-long-safe [s]
+  (try
+    (Long/parseLong (str/trim (str s)))
+    (catch Exception _
+      nil)))
+
+(defn- parse-time-seconds [s]
+  (when-let [[_ h m sec] (re-matches #"(\d+):(\d+):(\d+(?:\.\d+)?)" (str/trim (str s)))]
+    (+ (* 3600.0 (Double/parseDouble h))
+       (* 60.0 (Double/parseDouble m))
+       (Double/parseDouble sec))))
+
+(defn- progress-seconds [state]
+  (or (some-> (:out_time_us state) parse-long-safe (/ 1000000.0))
+      (some-> (:out_time_ms state) parse-long-safe (/ 1000000.0))
+      (some-> (:out_time state) parse-time-seconds)))
+
+(defn- progress-percent [video state]
+  (let [duration (or (:duration-seconds video)
+                     (:playable_duration video)
+                     (:source_duration video)
+                     (get-in video [:raw :playable_duration])
+                     (get-in video [:raw :source_duration])
+                     (get-in video [:raw :video_properties :duration]))
+        seconds (progress-seconds state)]
+    (when (and duration seconds (pos? (double duration)))
+      (min 99.0 (* 100.0 (/ seconds (double duration)))))))
+
+(defn- parse-progress-line [line]
+  (when-let [[_ k v] (re-matches #"([^=]+)=(.*)" line)]
+    [(keyword k) v]))
+
 (defn- ffmpeg-args [opts input out-file]
   (vec (concat [(or (:ffmpeg-bin opts) "ffmpeg")
                 "-hide_banner"
                 "-loglevel" "warning"
+                "-nostats"
+                "-progress" "pipe:1"
                 "-y"
                 "-protocol_whitelist" "file,http,https,tcp,tls,crypto,data"
                 "-allowed_extensions" "ALL"
@@ -329,6 +369,34 @@
                 "-c" "copy"
                 "-movflags" "+faststart"
                 (.getPath out-file)])))
+
+(defn- run-ffmpeg! [opts video argv]
+  (let [state (atom {})]
+    (process/run-with-line-handlers!
+     argv
+     {:out-line (fn [line]
+                  (when-let [[k v] (parse-progress-line line)]
+                    (swap! state assoc k v)
+                    (when-let [percent (progress-percent video @state)]
+                      (progress! opts video {:phase "downloading"
+                                             :percent percent}))))
+      :err-line (fn [_line])})))
+
+(defn- move-file! [from to]
+  (try
+    (java.nio.file.Files/move (.toPath from)
+                              (.toPath to)
+                              (into-array java.nio.file.CopyOption
+                                          [java.nio.file.StandardCopyOption/REPLACE_EXISTING
+                                           java.nio.file.StandardCopyOption/ATOMIC_MOVE]))
+    (catch java.nio.file.AtomicMoveNotSupportedException _
+      (java.nio.file.Files/move (.toPath from)
+                                (.toPath to)
+                                (into-array java.nio.file.CopyOption
+                                            [java.nio.file.StandardCopyOption/REPLACE_EXISTING])))))
+
+(defn- temp-output-file [dir ext]
+  (io/file dir (str "video.part." ext)))
 
 (defn download! [opts video dir]
   (when-not (process/executable? (or (:ffmpeg-bin opts) "ffmpeg"))
@@ -338,30 +406,40 @@
   (.mkdirs (io/file dir))
   (let [hls-dir (io/file dir ".loom-hls")]
     (try
+      (progress! opts video {:phase "resolving" :percent 0.0})
       (let [media (resolve-media opts video)
             preferred (or (some #(when (#{"mp4" "webm" "mov" "mkv"} (ext-from-url (:url %))) %) media)
                           (first media))
             ext (or (ext-from-url (:url preferred)) "mp4")
             out-file (io/file dir (str "video." (if (#{"m3u8" "mpd"} ext) "mp4" ext)))
+            part-file (temp-output-file dir (if (#{"m3u8" "mpd"} ext) "mp4" ext))
+            _ (io/delete-file part-file true)
             input (if (= "m3u8" ext)
                     (.getPath (local-hls-playlist! (:url preferred) dir))
                     (:url preferred))
-            result (process/run! (ffmpeg-args opts input out-file))]
-        (if (and (zero? (:exit result)) (.exists out-file) (pos? (.length out-file)))
-          {:status :downloaded
-           :resolver :loom-media
-           :media-kind (:kind preferred)
-           :files (->> (file-seq (io/file dir))
-                       (filter #(.isFile %))
-                       (remove #(str/starts-with? (.getPath %) (.getPath hls-dir)))
-                       (map #(.getName %))
-                       sort
-                       vec)}
-          {:status :skipped
-           :reason :download-failed
-           :resolver :loom-media
-           :media-kind (:kind preferred)
-           :message (str/trim (or (:err result) (:out result)))}))
+            result (run-ffmpeg! opts video (ffmpeg-args opts input part-file))]
+        (if (and (zero? (:exit result)) (.exists part-file) (pos? (.length part-file)))
+          (do
+            (move-file! part-file out-file)
+            (progress! opts video {:phase "downloaded" :percent 100.0 :done? true})
+            {:status :downloaded
+             :resolver :loom-media
+             :media-kind (:kind preferred)
+             :files (->> (file-seq (io/file dir))
+                         (filter #(.isFile %))
+                         (remove #(str/starts-with? (.getPath %) (.getPath hls-dir)))
+                         (remove #(str/includes? (.getName %) ".part."))
+                         (map #(.getName %))
+                         sort
+                         vec)})
+          (do
+            (io/delete-file part-file true)
+            (progress! opts video {:phase "failed" :done? true})
+            {:status :skipped
+             :reason :download-failed
+             :resolver :loom-media
+             :media-kind (:kind preferred)
+             :message (str/trim (or (:err result) (:out result)))})))
       (finally
         (when (.exists hls-dir)
           (doseq [f (reverse (file-seq hls-dir))]

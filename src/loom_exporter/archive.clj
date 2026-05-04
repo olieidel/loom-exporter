@@ -2,6 +2,7 @@
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [loom-exporter.json :as json]
+            [loom-exporter.process :as process]
             [loom-exporter.util :as util]))
 
 (def manifest-version 1)
@@ -89,7 +90,51 @@
              (when-let [description (:description video)]
                (str "\n## Description\n\n" description "\n")))))
 
-(defn complete-video-file? [dir]
-  (some #(and (.isFile %) (re-matches #"video\.(mp4|webm|mkv|mov)" (.getName %)) (pos? (.length %)))
-        (file-seq dir)))
+(defn video-file [dir]
+  (some #(when (and (.isFile %)
+                    (re-matches #"video\.(mp4|webm|mkv|mov)" (.getName %))
+                    (pos? (.length %)))
+           %)
+        (file-seq (io/file dir))))
 
+(defn- parse-duration-double [s]
+  (try
+    (Double/parseDouble (str/trim (str s)))
+    (catch Exception _
+      nil)))
+
+(defn media-duration-seconds [file]
+  (when (and file (process/executable? "ffprobe"))
+    (let [{:keys [exit out]} (process/run!
+                              ["ffprobe"
+                               "-v" "error"
+                               "-show_entries" "format=duration"
+                               "-of" "default=noprint_wrappers=1:nokey=1"
+                               (.getPath file)])]
+      (when (zero? exit)
+        (parse-duration-double out)))))
+
+(defn- expected-duration [video]
+  (or (:duration-seconds video)
+      (:playable_duration video)
+      (:source_duration video)
+      (get-in video [:raw :playable_duration])
+      (get-in video [:raw :source_duration])
+      (get-in video [:raw :video_properties :duration])))
+
+(defn- duration-complete? [file video]
+  (let [ffprobe? (process/executable? "ffprobe")
+        expected (expected-duration video)
+        actual (media-duration-seconds file)]
+    (cond
+      (not ffprobe?) true
+      (nil? actual) false
+      (nil? expected) (pos? actual)
+      :else (>= actual (max 1.0 (* 0.95 (double expected)))))))
+
+(defn complete-video-file?
+  ([dir] (complete-video-file? dir nil))
+  ([dir video]
+   (when-let [file (video-file dir)]
+     (when (duration-complete? file video)
+       file))))

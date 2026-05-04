@@ -1,6 +1,8 @@
 (ns loom-exporter.archive-test
+  (:import [java.nio.file Files])
   (:require [clojure.test :refer [deftest is]]
             [loom-exporter.archive :as archive]
+            [loom-exporter.process :as process]
             [loom-exporter.util :as util]))
 
 (deftest safe-id-and-slug-are-filesystem-friendly
@@ -16,3 +18,14 @@
          (archive/transcript->srt [{:start 1.25 :end 3 :text "Hello"}
                                    {:start 3 :duration 2.5 :text "World"}]))))
 
+(deftest invalid-video-file-is-not-complete-when-ffprobe-is-available
+  (when (process/executable? "ffprobe")
+    (let [dir (.toFile (Files/createTempDirectory
+                        "loom-exporter-test"
+                        (make-array java.nio.file.attribute.FileAttribute 0)))]
+      (try
+        (spit (java.io.File. dir "video.mp4") "not a video")
+        (is (nil? (archive/complete-video-file? dir {:duration-seconds 10})))
+        (finally
+          (doseq [f (reverse (file-seq dir))]
+            (clojure.java.io/delete-file f true)))))))

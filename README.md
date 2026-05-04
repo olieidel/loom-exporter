@@ -46,11 +46,25 @@ Interactively select videos and download only those selections:
 clojure -M:run select \
   --loom-web \
   --cookie-file cookies.txt \
+  --jobs 2 \
   --loom-source ALL \
   --out exports/loom
 ```
 
 The selector accepts comma-separated numbers and ranges, for example `1,3-5`, plus `all` to select everything shown.
+On an interactive terminal, `select` opens a full-screen picker:
+
+- `Up`/`Down` or `j`/`k` moves the cursor.
+- `Space` toggles the highlighted video.
+- `/` starts filtering; type to search titles, ids, URLs, owners, or visibility.
+- `a` toggles all currently shown videos.
+- `n` clears the selection.
+- `Enter` starts downloading the selected videos.
+- `q` cancels.
+
+If the terminal does not support raw interactive input, the command falls back to the comma-separated prompt.
+
+Downloads show terminal progress bars when running in an interactive terminal. Use `--no-progress` to disable them. Use `--jobs N` to export multiple selected videos in parallel; start conservatively because Loom/CDN throttling and local network bandwidth can make high values slower rather than faster.
 
 Discover from explicit Loom URLs:
 
@@ -98,3 +112,4 @@ exports/loom/
 - Some Loom plans, workspace settings, or per-video permissions may prevent MP4 downloads. Those videos stay in `manifest.json` with a structured skip reason.
 - `--cookie-file` can read Netscape `cookies.txt` or a raw Loom `Cookie:` header. Keep this file private; it is equivalent to a browser session.
 - `ffmpeg` must be installed and on `PATH` for video downloads.
+- Downloads are written to `video.part.<ext>` first and moved to `video.<ext>` only after `ffmpeg` exits successfully. On resume, existing files are checked with `ffprobe` when available; truncated files whose duration is much shorter than Loom metadata are redownloaded.

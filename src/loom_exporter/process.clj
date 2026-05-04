@@ -1,6 +1,7 @@
 (ns loom-exporter.process
   (:refer-clojure :exclude [run!])
-  (:require [clojure.string :as str]))
+  (:require [clojure.java.io :as io]
+            [clojure.string :as str]))
 
 (defn executable? [cmd]
   (let [candidate (java.io.File. cmd)]
@@ -19,12 +20,42 @@
   [argv]
   (let [pb (ProcessBuilder. ^java.util.List (vec argv))
         process (.start pb)
-        out-future (future (slurp (.getInputStream process)))
-        err-future (future (slurp (.getErrorStream process)))
+        out-result (promise)
+        err-result (promise)
+        out-thread (Thread. #(deliver out-result (slurp (.getInputStream process))))
+        err-thread (Thread. #(deliver err-result (slurp (.getErrorStream process))))
+        _ (.start out-thread)
+        _ (.start err-thread)
         exit (.waitFor process)]
     {:exit exit
-     :out @out-future
-     :err @err-future}))
+     :out @out-result
+     :err @err-result}))
+
+(defn- read-lines! [stream handler]
+  (with-open [reader (io/reader stream)]
+    (let [lines (atom [])]
+      (doseq [line (line-seq reader)]
+        (swap! lines conj line)
+        (when handler
+          (handler line)))
+      (str/join "\n" @lines))))
+
+(defn run-with-line-handlers!
+  "Runs argv and invokes handlers for stdout/stderr lines as they arrive.
+  Returns {:exit n :out s :err s}. Does not throw on non-zero."
+  [argv {:keys [out-line err-line]}]
+  (let [pb (ProcessBuilder. ^java.util.List (vec argv))
+        process (.start pb)
+        out-result (promise)
+        err-result (promise)
+        out-thread (Thread. #(deliver out-result (read-lines! (.getInputStream process) out-line)))
+        err-thread (Thread. #(deliver err-result (read-lines! (.getErrorStream process) err-line)))
+        _ (.start out-thread)
+        _ (.start err-thread)
+        exit (.waitFor process)]
+    {:exit exit
+     :out @out-result
+     :err @err-result}))
 
 (defn run-ok! [argv]
   (let [{:keys [exit out err] :as result} (run! argv)]

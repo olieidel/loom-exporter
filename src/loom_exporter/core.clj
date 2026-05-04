@@ -5,8 +5,10 @@
             [loom-exporter.json :as json]
             [loom-exporter.loom-media :as loom-media]
             [loom-exporter.loom-web :as loom-web]
+            [loom-exporter.progress :as progress]
             [loom-exporter.util :as util]
-            [loom-exporter.video :as video]))
+            [loom-exporter.video :as video])
+  (:import [java.util.concurrent Callable Executors]))
 
 (defn- read-urls-file [path]
   (->> (str/split-lines (slurp path))
@@ -70,11 +72,18 @@
 
 (defn- existing-download? [opts video]
   (and (not (:force opts))
-       (archive/complete-video-file? (archive/video-dir (:out opts) video))))
+       (archive/complete-video-file? (archive/video-dir (:out opts) video) video)))
+
+(defn- progress! [opts video data]
+  (when-let [f (:progress-fn opts)]
+    (f (or (:id video) (:url video))
+       (merge {:title (:title video)}
+              data))))
 
 (defn export-video! [opts video]
   (let [dir (archive/video-dir (:out opts) video)
         _ (.mkdirs dir)
+        _ (progress! opts video {:phase "metadata" :percent 0.0})
         video (loom-media/enrich-video opts video)
         _ (archive/write-transcript! dir (:transcript video))
         _ (loom-media/write-sidecars! opts video dir)
@@ -86,52 +95,92 @@
                  {:status :skipped :reason :missing-url}
 
                  (existing-download? opts video)
-                 {:status :already-downloaded}
+                 (do
+                   (progress! opts video {:phase "already done" :percent 100.0 :done? true})
+                   {:status :already-downloaded})
 
                  :else
                  (try
                    (loom-media/download! opts video dir)
                    (catch Exception e
+                     (progress! opts video {:phase "failed" :done? true})
                      {:status :skipped
                       :reason (or (:type (ex-data e)) :download-error)
                       :message (.getMessage e)})))]
+    (when (and (not (:done? status))
+               (#{:metadata-only :skipped} (:status status)))
+      (progress! opts video {:phase (name (:status status)) :done? true}))
     (archive/write-video-metadata! (:out opts) video status)
     (archive/write-readme! dir video status)
     (assoc video :export status :archive-path (.getPath dir))))
 
+(defn- jobs [opts]
+  (max 1 (long (or (:jobs opts) 1))))
+
+(defn- export-videos! [opts videos]
+  (if (= 1 (jobs opts))
+    (doall (map #(export-video! opts %) videos))
+    (let [executor (Executors/newFixedThreadPool (jobs opts))]
+      (try
+        (let [futures (mapv (fn [video]
+                              (.submit executor
+                                       ^Callable
+                                       (reify Callable
+                                         (call [_]
+                                           (export-video! opts video)))))
+                            videos)]
+          (mapv #(.get %) futures))
+        (finally
+          (.shutdownNow executor))))))
+
+(defn- with-progress [opts f]
+  (if (or (:skip-video opts) (:no-progress opts))
+    (f opts)
+    (let [{:keys [update finish]} (progress/start!)]
+      (try
+        (f (assoc opts :progress-fn update))
+        (finally
+          (finish))))))
+
 (defn export! [opts]
-  (let [videos (if (or (:manifest opts) (:archive opts))
-                 (videos-from-input opts)
-                 (if-let [existing (archive/read-manifest (:out opts))]
-                   (:videos existing)
-                   (discover-videos opts)))
-        exported (doall (map #(export-video! opts %) videos))
-        manifest (assoc (archive/manifest exported)
-                        :exported-at (util/now-iso))]
-    (archive/write-manifest! (:out opts) manifest)
-    {:status :ok
-     :video-count (count exported)
-     :downloaded (count (filter #(#{:downloaded :already-downloaded}
-                                  (get-in % [:export :status]))
-                                exported))
-     :skipped (count (filter #(= :skipped (get-in % [:export :status]))
-                             exported))
-     :manifest (.getPath (archive/manifest-path (:out opts)))}))
+  (with-progress
+    opts
+    (fn [opts]
+      (let [videos (if (or (:manifest opts) (:archive opts))
+                     (videos-from-input opts)
+                     (if-let [existing (archive/read-manifest (:out opts))]
+                       (:videos existing)
+                       (discover-videos opts)))
+            exported (export-videos! opts videos)
+            manifest (assoc (archive/manifest exported)
+                            :exported-at (util/now-iso))]
+        (archive/write-manifest! (:out opts) manifest)
+        {:status :ok
+         :video-count (count exported)
+         :downloaded (count (filter #(#{:downloaded :already-downloaded}
+                                      (get-in % [:export :status]))
+                                    exported))
+         :skipped (count (filter #(= :skipped (get-in % [:export :status]))
+                                 exported))
+         :manifest (.getPath (archive/manifest-path (:out opts)))}))))
 
 (defn export-selected! [opts videos]
-  (let [exported (doall (map #(export-video! opts %) videos))
-        manifest (assoc (archive/manifest exported)
-                        :exported-at (util/now-iso)
-                        :selection true)]
-    (archive/write-manifest! (:out opts) manifest)
-    {:status :ok
-     :video-count (count exported)
-     :downloaded (count (filter #(#{:downloaded :already-downloaded}
-                                  (get-in % [:export :status]))
-                                exported))
-     :skipped (count (filter #(= :skipped (get-in % [:export :status]))
-                             exported))
-     :manifest (.getPath (archive/manifest-path (:out opts)))}))
+  (with-progress
+    opts
+    (fn [opts]
+      (let [exported (export-videos! opts videos)
+            manifest (assoc (archive/manifest exported)
+                            :exported-at (util/now-iso)
+                            :selection true)]
+        (archive/write-manifest! (:out opts) manifest)
+        {:status :ok
+         :video-count (count exported)
+         :downloaded (count (filter #(#{:downloaded :already-downloaded}
+                                      (get-in % [:export :status]))
+                                    exported))
+         :skipped (count (filter #(= :skipped (get-in % [:export :status]))
+                                 exported))
+         :manifest (.getPath (archive/manifest-path (:out opts)))}))))
 
 (defn- status-key [x]
   (cond
@@ -150,7 +199,7 @@
                 (fn [video]
                   (let [dir (archive/video-dir (:archive opts) video)
                         metadata (io/file dir "metadata.json")
-                        video-file? (archive/complete-video-file? dir)
+                        video-file? (archive/complete-video-file? dir video)
                         status (status-key (get-in video [:export :status]))]
                     {:id (:id video)
                      :title (:title video)
