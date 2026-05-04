@@ -1,0 +1,6 @@
+.cpcache/
+target/
+exports/
+tmp/
+cookies.txt
+*.log
