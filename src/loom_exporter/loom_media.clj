@@ -450,7 +450,7 @@
         source-url (:source_url details)
         captions-url (:captions_source_url details)]
     (when details
-      (json/write-json-file! (io/file dir "transcript-details.json") details))
+      (archive/write-data-file! (archive/data-path dir "transcript-details" opts) details))
     (when captions-url
       (try
         (download-url! captions-url (io/file dir "captions.vtt"))

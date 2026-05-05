@@ -1,17 +1,62 @@
 (ns loom-exporter.archive
-  (:require [clojure.java.io :as io]
+  (:require [clojure.edn :as edn]
+            [clojure.java.io :as io]
+            [clojure.pprint :as pprint]
             [clojure.string :as str]
             [loom-exporter.json :as json]
             [loom-exporter.process :as process]
             [loom-exporter.util :as util]))
 
 (def manifest-version 1)
+(def archive-formats #{:edn :json})
 
 (defn root [out]
   (io/file out))
 
-(defn manifest-path [out]
-  (io/file (root out) "manifest.json"))
+(defn archive-format [opts]
+  (let [format (keyword (or (:archive-format opts) "edn"))]
+    (when-not (archive-formats format)
+      (throw (ex-info "Unsupported archive format. Use edn or json."
+                      {:type :invalid-archive-format
+                       :archive-format (:archive-format opts)})))
+    format))
+
+(defn data-path [dir basename opts]
+  (io/file dir (str basename "." (name (archive-format opts)))))
+
+(defn manifest-path
+  ([out] (manifest-path out nil))
+  ([out opts]
+   (data-path (root out) "manifest" opts)))
+
+(defn- extension [path]
+  (some->> (.getName (io/file path))
+           (re-find #"\.([^.]+)$")
+           second
+           str/lower-case
+           keyword))
+
+(defn read-data-file [path]
+  (case (extension path)
+    :edn (edn/read-string (slurp path))
+    :json (json/read-json-file path)
+    (throw (ex-info "Unsupported data file extension. Use .edn or .json."
+                    {:type :unsupported-data-extension
+                     :path (str path)}))))
+
+(defn- write-edn-file! [path value]
+  (io/make-parents path)
+  (with-open [writer (io/writer path)]
+    (binding [*out* writer]
+      (pprint/pprint value))))
+
+(defn write-data-file! [path value]
+  (case (extension path)
+    :edn (write-edn-file! path value)
+    :json (json/write-json-file! path value)
+    (throw (ex-info "Unsupported data file extension. Use .edn or .json."
+                    {:type :unsupported-data-extension
+                     :path (str path)}))))
 
 (defn video-dir-name [video]
   (str (util/safe-id (or (:id video) (util/loom-id-from-url (:url video))))
@@ -21,13 +66,24 @@
 (defn video-dir [out video]
   (io/file (root out) "videos" (video-dir-name video)))
 
-(defn read-manifest [out]
-  (let [f (manifest-path out)]
-    (when (.exists f)
-      (json/read-json-file f))))
+(defn- candidate-paths [dir basename opts]
+  (distinct
+   (concat [(data-path dir basename opts)]
+           (map #(data-path dir basename {:archive-format (name %)})
+                archive-formats))))
 
-(defn write-manifest! [out manifest]
-  (json/write-json-file! (manifest-path out) manifest))
+(defn read-manifest
+  ([out] (read-manifest out nil))
+  ([out opts]
+   (some (fn [f]
+           (when (.exists f)
+             (read-data-file f)))
+         (candidate-paths (root out) "manifest" opts))))
+
+(defn write-manifest!
+  ([out manifest] (write-manifest! out manifest nil))
+  ([out manifest opts]
+   (write-data-file! (manifest-path out opts) manifest)))
 
 (defn manifest [videos]
   {:manifest-version manifest-version
@@ -35,12 +91,24 @@
    :video-count (count videos)
    :videos (vec videos)})
 
-(defn write-video-metadata! [out video status]
-  (let [dir (video-dir out video)]
-    (.mkdirs dir)
-    (json/write-json-file! (io/file dir "metadata.json")
-                           (assoc video :export status))
-    dir))
+(defn metadata-path
+  ([out video] (metadata-path out video nil))
+  ([out video opts]
+   (data-path (video-dir out video) "metadata" opts)))
+
+(defn existing-metadata-file [out video opts]
+  (some (fn [f]
+          (when (.exists f) f))
+        (candidate-paths (video-dir out video) "metadata" opts)))
+
+(defn write-video-metadata!
+  ([out video status] (write-video-metadata! out video status nil))
+  ([out video status opts]
+   (let [dir (video-dir out video)]
+     (.mkdirs dir)
+     (write-data-file! (metadata-path out video opts)
+                       (assoc video :export status))
+     dir)))
 
 (defn- seconds->srt-time [seconds]
   (let [millis (long (* 1000.0 (double (or seconds 0))))
@@ -73,11 +141,13 @@
                    (str/trim (str text)) "\n"))))
          (str/join "\n"))))
 
-(defn write-transcript! [dir transcript]
-  (when transcript
-    (json/write-json-file! (io/file dir "transcript.json") transcript)
-    (when-let [srt (transcript->srt transcript)]
-      (spit (io/file dir "captions.srt") srt))))
+(defn write-transcript!
+  ([dir transcript] (write-transcript! dir transcript nil))
+  ([dir transcript opts]
+   (when transcript
+     (write-data-file! (data-path dir "transcript" opts) transcript)
+     (when-let [srt (transcript->srt transcript)]
+       (spit (io/file dir "captions.srt") srt)))))
 
 (defn write-readme! [dir video status]
   (spit (io/file dir "README.md")
