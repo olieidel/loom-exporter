@@ -101,7 +101,7 @@ exports/loom/
       metadata.edn
       README.md
       transcript-details.edn
-      transcript.json
+      transcript-source.json
       captions.vtt
       captions.srt
       video.mp4

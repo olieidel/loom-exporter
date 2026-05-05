@@ -1,62 +1,28 @@
 (ns loom-exporter.archive
-  (:require [clojure.edn :as edn]
-            [clojure.java.io :as io]
-            [clojure.pprint :as pprint]
+  (:require [clojure.java.io :as io]
             [clojure.string :as str]
-            [loom-exporter.json :as json]
+            [loom-exporter.data :as data]
             [loom-exporter.process :as process]
             [loom-exporter.util :as util]))
 
 (def manifest-version 1)
-(def archive-formats #{:edn :json})
 
 (defn root [out]
   (io/file out))
 
-(defn archive-format [opts]
-  (let [format (keyword (or (:archive-format opts) "edn"))]
-    (when-not (archive-formats format)
-      (throw (ex-info "Unsupported archive format. Use edn or json."
-                      {:type :invalid-archive-format
-                       :archive-format (:archive-format opts)})))
-    format))
-
 (defn data-path [dir basename opts]
-  (io/file dir (str basename "." (name (archive-format opts)))))
+  (data/path dir basename opts))
 
 (defn manifest-path
   ([out] (manifest-path out nil))
   ([out opts]
    (data-path (root out) "manifest" opts)))
 
-(defn- extension [path]
-  (some->> (.getName (io/file path))
-           (re-find #"\.([^.]+)$")
-           second
-           str/lower-case
-           keyword))
-
 (defn read-data-file [path]
-  (case (extension path)
-    :edn (edn/read-string (slurp path))
-    :json (json/read-json-file path)
-    (throw (ex-info "Unsupported data file extension. Use .edn or .json."
-                    {:type :unsupported-data-extension
-                     :path (str path)}))))
-
-(defn- write-edn-file! [path value]
-  (io/make-parents path)
-  (with-open [writer (io/writer path)]
-    (binding [*out* writer]
-      (pprint/pprint value))))
+  (data/read-file path))
 
 (defn write-data-file! [path value]
-  (case (extension path)
-    :edn (write-edn-file! path value)
-    :json (json/write-json-file! path value)
-    (throw (ex-info "Unsupported data file extension. Use .edn or .json."
-                    {:type :unsupported-data-extension
-                     :path (str path)}))))
+  (data/write-file! path value))
 
 (defn video-dir-name [video]
   (str (util/safe-id (or (:id video) (util/loom-id-from-url (:url video))))
@@ -66,19 +32,13 @@
 (defn video-dir [out video]
   (io/file (root out) "videos" (video-dir-name video)))
 
-(defn- candidate-paths [dir basename opts]
-  (distinct
-   (concat [(data-path dir basename opts)]
-           (map #(data-path dir basename {:archive-format (name %)})
-                archive-formats))))
-
 (defn read-manifest
   ([out] (read-manifest out nil))
   ([out opts]
    (some (fn [f]
            (when (.exists f)
              (read-data-file f)))
-         (candidate-paths (root out) "manifest" opts))))
+         (data/candidate-paths (root out) "manifest" opts))))
 
 (defn write-manifest!
   ([out manifest] (write-manifest! out manifest nil))
@@ -99,7 +59,7 @@
 (defn existing-metadata-file [out video opts]
   (some (fn [f]
           (when (.exists f) f))
-        (candidate-paths (video-dir out video) "metadata" opts)))
+        (data/candidate-paths (video-dir out video) "metadata" opts)))
 
 (defn write-video-metadata!
   ([out video status] (write-video-metadata! out video status nil))

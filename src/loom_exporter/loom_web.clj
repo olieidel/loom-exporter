@@ -8,11 +8,11 @@
 (def graphql-url "https://www.loom.com/graphql")
 
 (def get-looms-query
-  "query GetLoomsForLibrary($limit: Int!, $cursor: String, $folderId: String, $sourceValue: String, $source: LoomsSource!, $sortType: LoomsSortType!, $sortOrder: LoomsSortOrder!, $sortGrouping: LoomsSortGrouping, $filters: [[LoomsCollectionFilter!]!], $timeRange: TimeRange) {
+  "query GetLoomsForLibrary($limit: Int!, $cursor: String, $source: LoomsSource!, $sortType: LoomsSortType!, $sortOrder: LoomsSortOrder!) {
   getLooms {
     __typename
     ... on GetLoomsPayload {
-      videos(first: $limit, after: $cursor, folderId: $folderId, sourceValue: $sourceValue, source: $source, sortType: $sortType, sortOrder: $sortOrder, sortGrouping: $sortGrouping, filters: $filters, timeRange: $timeRange) {
+      videos(first: $limit, after: $cursor, source: $source, sortType: $sortType, sortOrder: $sortOrder) {
         edges {
           cursor
           node {
@@ -74,14 +74,10 @@
 
 (defn- page-variables [opts cursor]
   {:source (or (:loom-source opts) "ALL")
-   :sortType (or (:loom-sort-type opts) "RECENT")
-   :sortOrder (or (:loom-sort-order opts) "DESC")
-   :filters (or (:loom-filters opts) [])
+   :sortType "RECENT"
+   :sortOrder "DESC"
    :limit 50
-   :cursor cursor
-   :folderId (:folder-id opts)
-   :sourceValue (:source-value opts)
-   :timeRange nil})
+   :cursor cursor})
 
 (defn- normalize-node [node]
   {:id (:id node)

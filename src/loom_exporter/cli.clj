@@ -20,7 +20,7 @@
    :list-format [nil "--list-format FORMAT" "Output format: table, json, edn" :default "table"
                  :validate [#{"table" "json" "edn"} "Must be table, json, or edn"]]
    :loom-source [nil "--loom-source SOURCE" "Loom web source enum" :default "ALL"]
-   :manifest [nil "--manifest FILE" "Existing manifest file"]
+   :manifest [nil "--manifest FILE" "Read videos from manifest file"]
    :no-progress [nil "--no-progress" "Disable terminal progress bars"]
    :out ["-o" "--out DIR" "Archive output directory" :default "exports/loom"]
    :skip-video [nil "--skip-video" "Write metadata only; do not download video files"]
@@ -28,6 +28,12 @@
          :assoc-fn (fn [m k v] (update m k (fnil conj []) v))]
    :urls-file [nil "--urls-file FILE" "File containing Loom URLs, one per line"]
    :video-password [nil "--video-password PASSWORD" "Password for protected Loom videos"]})
+
+(def command-option-overrides
+  {"list" {:archive [nil "--archive DIR" "List videos from archive directory"]}
+   "export" {:archive [nil "--archive DIR" "Read videos from archive directory"]}
+   "verify" {:archive [nil "--archive DIR" "Archive directory to validate"]
+             :out ["-o" "--out DIR" "Archive directory to validate" :default "exports/loom"]}})
 
 (def command-option-keys
   {"list" [:archive :manifest :url :urls-file :cookie-file :loom-source :limit
@@ -48,8 +54,9 @@
    "export" "Export videos from manifest or discovery"
    "verify" "Validate an archive"})
 
-(defn- option-list [ks]
-  (mapv option-defs ks))
+(defn- option-list [command ks]
+  (let [overrides (get command-option-overrides command)]
+    (mapv #(or (get overrides %) (option-defs %)) ks)))
 
 (def usage
   (str/join
@@ -87,8 +94,8 @@
                            [nil (first args)]
                            args)
         options (if-let [ks (command-option-keys command)]
-                  (option-list ks)
-                  (option-list [:help]))
+                  (option-list command ks)
+                  (option-list nil [:help]))
         parsed (parse-opts rest options)]
     (assoc parsed :command command)))
 
