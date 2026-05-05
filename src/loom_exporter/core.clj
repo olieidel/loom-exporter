@@ -2,7 +2,6 @@
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [loom-exporter.archive :as archive]
-            [loom-exporter.json :as json]
             [loom-exporter.loom-media :as loom-media]
             [loom-exporter.loom-web :as loom-web]
             [loom-exporter.progress :as progress]
@@ -23,6 +22,10 @@
 
 (defn discover-videos [opts]
   (let [urls (option-urls opts)
+        _ (when (and (empty? urls)
+                     (not (:cookie-file opts)))
+            (throw (ex-info "Video discovery needs --cookie-file, --url, or --urls-file."
+                            {:type :discovery-source-missing})))
         from-urls (when (seq urls)
                     (doall
                      (for [url urls]
@@ -33,9 +36,8 @@
                             :source :url
                             :url url
                             :title "Untitled Loom"})))))
-        from-loom-web (when (or (:loom-web opts)
-                                (and (empty? urls)
-                                     (or (:cookie opts) (:cookie-file opts))))
+        from-loom-web (when (and (empty? urls)
+                                 (:cookie-file opts))
                         (loom-web/query-videos opts))]
     (video/dedupe-videos (concat from-loom-web from-urls))))
 
@@ -43,20 +45,20 @@
   (let [videos (discover-videos opts)
         manifest (archive/manifest videos)]
     (.mkdirs (io/file (:out opts)))
-    (archive/write-manifest! (:out opts) manifest)
+    (archive/write-manifest! (:out opts) manifest opts)
     {:status :ok
      :video-count (count videos)
-     :manifest (.getPath (archive/manifest-path (:out opts)))}))
+     :manifest (.getPath (archive/manifest-path (:out opts) opts))}))
 
 (defn videos-from-input [opts]
   (cond
     (:manifest opts)
-    (:videos (json/read-json-file (:manifest opts)))
+    (:videos (archive/read-data-file (:manifest opts)))
 
     (:archive opts)
-    (let [manifest (archive/read-manifest (:archive opts))]
+    (let [manifest (archive/read-manifest (:archive opts) opts)]
       (when-not manifest
-        (throw (ex-info "Archive manifest.json was not found."
+        (throw (ex-info "Archive manifest was not found."
                         {:type :manifest-missing
                          :archive (:archive opts)})))
       (:videos manifest))
@@ -85,7 +87,7 @@
         _ (.mkdirs dir)
         _ (progress! opts video {:phase "metadata" :percent 0.0})
         video (loom-media/enrich-video opts video)
-        _ (archive/write-transcript! dir (:transcript video))
+        _ (archive/write-transcript! dir (:transcript video) opts)
         _ (loom-media/write-sidecars! opts video dir)
         status (cond
                  (:skip-video opts)
@@ -110,7 +112,7 @@
     (when (and (not (:done? status))
                (#{:metadata-only :skipped} (:status status)))
       (progress! opts video {:phase (name (:status status)) :done? true}))
-    (archive/write-video-metadata! (:out opts) video status)
+    (archive/write-video-metadata! (:out opts) video status opts)
     (archive/write-readme! dir video status)
     (assoc video :export status :archive-path (.getPath dir))))
 
@@ -148,13 +150,13 @@
     (fn [opts]
       (let [videos (if (or (:manifest opts) (:archive opts))
                      (videos-from-input opts)
-                     (if-let [existing (archive/read-manifest (:out opts))]
+                     (if-let [existing (archive/read-manifest (:out opts) opts)]
                        (:videos existing)
                        (discover-videos opts)))
             exported (export-videos! opts videos)
             manifest (assoc (archive/manifest exported)
                             :exported-at (util/now-iso))]
-        (archive/write-manifest! (:out opts) manifest)
+        (archive/write-manifest! (:out opts) manifest opts)
         {:status :ok
          :video-count (count exported)
          :downloaded (count (filter #(#{:downloaded :already-downloaded}
@@ -162,7 +164,7 @@
                                     exported))
          :skipped (count (filter #(= :skipped (get-in % [:export :status]))
                                  exported))
-         :manifest (.getPath (archive/manifest-path (:out opts)))}))))
+         :manifest (.getPath (archive/manifest-path (:out opts) opts))}))))
 
 (defn export-selected! [opts videos]
   (with-progress
@@ -172,7 +174,7 @@
             manifest (assoc (archive/manifest exported)
                             :exported-at (util/now-iso)
                             :selection true)]
-        (archive/write-manifest! (:out opts) manifest)
+        (archive/write-manifest! (:out opts) manifest opts)
         {:status :ok
          :video-count (count exported)
          :downloaded (count (filter #(#{:downloaded :already-downloaded}
@@ -180,7 +182,7 @@
                                     exported))
          :skipped (count (filter #(= :skipped (get-in % [:export :status]))
                                  exported))
-         :manifest (.getPath (archive/manifest-path (:out opts)))}))))
+         :manifest (.getPath (archive/manifest-path (:out opts) opts))}))))
 
 (defn- status-key [x]
   (cond
@@ -189,23 +191,23 @@
     :else nil))
 
 (defn verify! [opts]
-  (let [manifest (archive/read-manifest (:archive opts))
+  (let [manifest (archive/read-manifest (:archive opts) opts)
         _ (when-not manifest
-            (throw (ex-info "Archive manifest.json was not found."
+            (throw (ex-info "Archive manifest was not found."
                             {:type :manifest-missing
                              :archive (:archive opts)})))
         videos (:videos manifest)
         checks (mapv
                 (fn [video]
                   (let [dir (archive/video-dir (:archive opts) video)
-                        metadata (io/file dir "metadata.json")
+                        metadata (archive/existing-metadata-file (:archive opts) video opts)
                         video-file? (archive/complete-video-file? dir video)
                         status (status-key (get-in video [:export :status]))]
                     {:id (:id video)
                      :title (:title video)
-                     :metadata? (.exists metadata)
+                     :metadata? (boolean metadata)
                      :video-file? (boolean video-file?)
-                     :ok? (and (.exists metadata)
+                     :ok? (and metadata
                                (or (#{:metadata-only :skipped} status)
                                    video-file?))}))
                 videos)]

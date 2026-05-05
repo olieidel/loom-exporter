@@ -7,27 +7,49 @@
             [loom-exporter.json :as json]
             [loom-exporter.tui :as tui]))
 
-(def common-options
-  [["-o" "--out DIR" "Archive output directory" :default "exports/loom"]
-   [nil "--archive DIR" "Archive directory for verify"]
-   [nil "--manifest FILE" "Existing manifest to export from"]
-   [nil "--url URL" "Loom URL to include; repeatable" :assoc-fn (fn [m k v] (update m k (fnil conj []) v))]
-   [nil "--urls-file FILE" "File containing Loom URLs, one per line"]
-   [nil "--loom-web" "Use Loom's authenticated web GraphQL API for inventory"]
-   [nil "--loom-source SOURCE" "Loom web source enum" :default "ALL"]
-   [nil "--page-size N" "Loom web page size" :default 50 :parse-fn parse-long]
-   [nil "--page-limit N" "Maximum Loom web pages to request" :parse-fn parse-long]
-   [nil "--first N" "Maximum Loom web results" :parse-fn parse-long]
-   [nil "--cookie COOKIE" "Raw Loom browser Cookie header"]
-   [nil "--cookie-file FILE" "Raw Cookie header or Netscape cookies.txt file"]
-   [nil "--ffmpeg-bin BIN" "ffmpeg executable" :default "ffmpeg"]
-   [nil "--jobs N" "Parallel export jobs" :default 1 :parse-fn parse-long]
-   [nil "--no-progress" "Disable terminal progress bars"]
-   [nil "--video-password PASSWORD" "Password for protected Loom videos"]
-   [nil "--skip-video" "Write metadata only; do not download video files"]
-   [nil "--force" "Redownload even when a video file exists"]
-   [nil "--format FORMAT" "Output format for list: table, json, edn" :default "table"]
-   ["-h" "--help"]])
+(def option-defs
+  {:archive [nil "--archive DIR" "Existing archive directory"]
+   :archive-format [nil "--archive-format FORMAT" "Archive data format: edn or json" :default "edn"
+                    :validate [#{"edn" "json"} "Must be edn or json"]]
+   :cookie-file [nil "--cookie-file FILE" "Raw Cookie header or Netscape cookies.txt file"]
+   :ffmpeg-bin [nil "--ffmpeg-bin BIN" "ffmpeg executable" :default "ffmpeg"]
+   :force [nil "--force" "Redownload even when a video file exists"]
+   :help ["-h" "--help"]
+   :jobs [nil "--jobs N" "Parallel export jobs" :default 1 :parse-fn parse-long]
+   :limit [nil "--limit N" "Maximum Loom web results" :parse-fn parse-long]
+   :list-format [nil "--list-format FORMAT" "Output format: table, json, edn" :default "table"
+                 :validate [#{"table" "json" "edn"} "Must be table, json, or edn"]]
+   :loom-source [nil "--loom-source SOURCE" "Loom web source enum" :default "ALL"]
+   :manifest [nil "--manifest FILE" "Existing manifest file"]
+   :no-progress [nil "--no-progress" "Disable terminal progress bars"]
+   :out ["-o" "--out DIR" "Archive output directory" :default "exports/loom"]
+   :skip-video [nil "--skip-video" "Write metadata only; do not download video files"]
+   :url [nil "--url URL" "Loom URL to include; repeatable"
+         :assoc-fn (fn [m k v] (update m k (fnil conj []) v))]
+   :urls-file [nil "--urls-file FILE" "File containing Loom URLs, one per line"]
+   :video-password [nil "--video-password PASSWORD" "Password for protected Loom videos"]})
+
+(def command-option-keys
+  {"list" [:archive :manifest :url :urls-file :cookie-file :loom-source :limit
+           :video-password :list-format :help]
+   "inventory" [:out :url :urls-file :cookie-file :loom-source :limit
+                :video-password :archive-format :help]
+   "select" [:out :archive :manifest :url :urls-file :cookie-file :loom-source :limit
+             :jobs :no-progress :video-password :force :archive-format :ffmpeg-bin :help]
+   "export" [:out :archive :manifest :url :urls-file :cookie-file :loom-source :limit
+             :jobs :no-progress :video-password :skip-video :force :archive-format
+             :ffmpeg-bin :help]
+   "verify" [:archive :out :archive-format :help]})
+
+(def command-descriptions
+  {"list" "List accessible Loom videos"
+   "select" "Interactively select videos and download them"
+   "inventory" "Discover accessible Loom videos and write a manifest"
+   "export" "Export videos from manifest or discovery"
+   "verify" "Validate an archive"})
+
+(defn- option-list [ks]
+  (mapv option-defs ks))
 
 (def usage
   (str/join
@@ -37,22 +59,37 @@
     "Commands:"
     "  list       List accessible Loom videos"
     "  select     Interactively select videos and download them"
-    "  inventory  Discover accessible Loom videos and write manifest.json"
+    "  inventory  Discover accessible Loom videos and write manifest.edn"
     "  export     Export videos from manifest or discovery"
     "  verify     Validate an archive"
     ""
     "Examples:"
-    "  clojure -M:run list --loom-web --cookie-file cookies.txt --first 20"
-    "  clojure -M:run select --loom-web --cookie-file cookies.txt --out exports/loom"
+    "  clojure -M:run list --cookie-file cookies.txt --limit 20"
+    "  clojure -M:run select --cookie-file cookies.txt --out exports/loom"
     "  clojure -M:run inventory --out exports/loom --url https://www.loom.com/share/..."
     "  clojure -M:run export --out exports/loom --cookie-file cookies.txt"
-    "  clojure -M:run verify --archive exports/loom"]))
+    "  clojure -M:run verify --archive exports/loom"
+    ""
+    "Run `clojure -M:run <command> --help` for command-specific options."]))
+
+(defn- command-usage [command summary]
+  (str/join
+   "\n"
+   [(str "Loom exporter " command)
+    ""
+    (command-descriptions command)
+    ""
+    "Options:"
+    summary]))
 
 (defn- parse-command [args]
   (let [[command & rest] (if (#{"--help" "-h"} (first args))
                            [nil (first args)]
                            args)
-        parsed (parse-opts rest common-options)]
+        options (if-let [ks (command-option-keys command)]
+                  (option-list ks)
+                  (option-list [:help]))
+        parsed (parse-opts rest options)]
     (assoc parsed :command command)))
 
 (defn- print-result [result]
@@ -87,7 +124,7 @@
       (print-row row))))
 
 (defn- print-list-result [options result]
-  (case (:format options)
+  (case (:list-format options)
     "json" (println (json/write-str result))
     "edn" (print-result result)
     "table" (do
@@ -96,7 +133,7 @@
               (println (str (:video-count result) " videos")))
     (throw (ex-info "Unsupported list format. Use table, json, or edn."
                     {:type :invalid-format
-                     :format (:format options)}))))
+                     :list-format (:list-format options)}))))
 
 (defn- select-and-download! [options]
   (let [{:keys [videos]} (core/list-videos options)]
@@ -119,10 +156,14 @@
 (defn -main [& args]
   (let [{:keys [command options errors summary]} (parse-command args)]
     (cond
-      (or (:help options) (nil? command))
+      (nil? command)
       (do (println usage)
-          (println)
-          (println summary)
+          (shutdown-agents))
+
+      (:help options)
+      (do (if (command-descriptions command)
+            (println (command-usage command summary))
+            (println usage))
           (shutdown-agents))
 
       (seq errors)

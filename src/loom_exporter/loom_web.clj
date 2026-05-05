@@ -36,9 +36,8 @@
 }")
 
 (defn cookie-header [opts]
-  (or (:cookie opts)
-      (when (:cookie-file opts)
-        (cookies/cookie-file->header (:cookie-file opts) "loom.com"))))
+  (when (:cookie-file opts)
+    (cookies/cookie-file->header (:cookie-file opts) "loom.com")))
 
 (defn- http-client []
   (java.net.http.HttpClient/newHttpClient))
@@ -78,7 +77,7 @@
    :sortType (or (:loom-sort-type opts) "RECENT")
    :sortOrder (or (:loom-sort-order opts) "DESC")
    :filters (or (:loom-filters opts) [])
-   :limit (or (:page-size opts) 50)
+   :limit 50
    :cursor cursor
    :folderId (:folder-id opts)
    :sourceValue (:source-value opts)
@@ -94,7 +93,7 @@
 
 (defn query-videos [opts]
   (when (str/blank? (cookie-header opts))
-    (throw (ex-info "Loom web inventory needs --cookie or --cookie-file."
+    (throw (ex-info "Loom web inventory needs --cookie-file."
                     {:type :loom-web-auth-missing})))
   (loop [cursor nil
          acc []
@@ -106,14 +105,10 @@
           next-cursor (get-in conn [:pageInfo :endCursor])
           has-next? (true? (get-in conn [:pageInfo :hasNextPage]))
           combined (into acc videos)
-          max-videos (:first opts)
-          page-limit (:page-limit opts)]
+          max-videos (:limit opts)]
       (cond
         (and max-videos (>= (count combined) max-videos))
         (vec (take max-videos combined))
-
-        (and page-limit (>= (inc pages) page-limit))
-        combined
 
         (and has-next? next-cursor)
         (recur next-cursor combined (inc pages))
